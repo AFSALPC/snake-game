@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Hand-Tracking Snake — Nokia 1100 Feel</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --panel:#0f1724;
+      --accent:#7ee787;
+      --muted:#9aa4b2;
+      --retro:#b5f5b0;
+      --canvas-size: min(92vmin,720px);
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#051020);color:#eef2ff;display:flex;align-items:center;justify-content:center}
+    .app { width: min(1100px, 96vw); max-width:1100px; display: grid; grid-template-columns: 1fr 320px; gap:16px; align-items:start;}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; padding:12px; box-shadow: 0 6px 20px rgba(2,6,23,0.6); border:1px solid rgba(255,255,255,0.03)}
+    .game-wrap{display:flex;flex-direction:column;gap:8px}
+    #gameCanvas{background:#041018; border-radius:8px; width:var(--canvas-size); height:var(--canvas-size); touch-action:none; image-rendering:pixelated; display:block;}
+    .hud{display:flex;gap:8px;align-items:center;justify-content:space-between}
+    .score{font-weight:700;color:var(--retro); font-size:18px}
+    .small{font-size:12px;color:var(--muted)}
+    .controls{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06); padding:8px 10px;border-radius:8px;color:inherit;cursor:pointer}
+    button.primary{background:linear-gradient(90deg,var(--accent),#45c66b); color:#022; font-weight:700; border:0}
+    .right-panel{width:320px; display:flex;flex-direction:column;gap:10px}
+    #videoPreview{position:relative;width:160px;height:120px;border-radius:8px; overflow:hidden;border:1px solid rgba(255,255,255,0.04); background:#000}
+    #videoPreview video{width:100%;height:100%;object-fit:cover; transform: scaleX(-1);} /* mirror preview for UX */
+    .status{font-size:13px;color:var(--muted)}
+    .fallback-controls{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+    .big{font-size:16px;padding:12px}
+    .footer{font-size:12px;color:var(--muted);margin-top:8px}
+    @media (max-width:980px){
+      .app{grid-template-columns:1fr; padding-bottom:40px}
+      .right-panel{width:100%}
+      #videoPreview{width:120px;height:90px}
+    }
+  </style>
+  <!-- MediaPipe & utils via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+</head>
+<body>
+  <div class="app">
+    <div class="card game-wrap">
+      <div class="hud">
+        <div>
+          <div class="score">Score: <span id="score">0</span></div>
+          <div class="small">High: <span id="highScore">0</span></div>
+        </div>
+        <div class="small" id="statusText">Initializing...</div>
+      </div>
+
+      <canvas id="gameCanvas" width="640" height="640"></canvas>
+
+      <div class="controls">
+        <button id="btnPause">Pause (open palm)</button>
+        <button id="btnResume">Resume (fist)</button>
+        <button id="btnRestart" class="primary">Restart (thumbs-up)</button>
+        <button id="btnCalibrate">Calibrate</button>
+        <button id="btnTogglePreview">Toggle Camera Preview</button>
+      </div>
+
+      <div class="footer small">Tip: If hand-tracking fails, use fallback on-screen buttons (below). Works in portrait & landscape. Aim index finger movement left/right/up/down to steer.</div>
+    </div>
+
+    <div class="right-panel">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div><strong>Camera</strong><div class="small">Preview & tracking</div></div>
+          <div id="cameraStatus" class="small">—</div>
+        </div>
+        <div style="margin-top:8px;display:flex;gap:10px;align-items:center">
+          <div id="videoPreview"><video id="inputVideo" playsinline></video></div>
+          <div style="flex:1">
+            <div class="status" id="trackingStatus">Tracker: initializing...</div>
+            <div class="small" id="gestureText">Gesture: —</div>
+            <div style="margin-top:8px" class="small">Calibrate so the app sees your neutral hand in the preview. Lighting helps detection.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:10px">
+          <div class="small">Fallback controls (tap):</div>
+          <div class="fallback-controls" style="margin-top:8px">
+            <button id="dirUp">↑</button>
+            <button id="dirLeft">←</button>
+            <button id="dirRight">→</button>
+            <button id="dirDown">↓</button>
+            <button id="pauseFallback">Pause</button>
+            <button id="restartFallback">Restart</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div><strong>Performance</strong></div>
+        <ul class="small" style="margin:8px 0 0 16px">
+          <li>Rendering: requestAnimationFrame</li>
+          <li>Game tick: fixed grid updates (deterministic)</li>
+          <li>Tracking rate: model inference decoupled from game tick</li>
+          <li>Gesture debounce: 100ms</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div><strong>Status / Logs</strong></div>
+        <pre id="logArea" class="small" style="max-height:150px;overflow:auto;margin-top:8px">Ready.</pre>
+      </div>
+    </div>
+  </div>
+
+<script>
+/*
+  Hand-Tracking Snake (single file) - FIXED JERKY MOVEMENT
+  - Uses MediaPipe Hands (cdn) to get 21 landmarks
+  - Maps index fingertip motion to 4 directions
+  - Grid-based snake tick (deterministic movement)
+  - Rendering at 60fps; tick at adjustable speed (default ≈ Nokia 1100)
+  - Gesture heuristics: open palm (pause), fist (resume), thumbs-up (restart)
+  - Fallback on-screen controls and calibration
+  - High score persistence via localStorage
+  - FIXED: Canvas size is now fixed to prevent jerky movement
+*/
+
+/* ===========================
+   === CONFIGURATION / STATE
+   =========================== */
+const config = {
+  gridSize: 20,                 // 20x20 grid
+  initialLength: 3,
+  initialSpeed: 6,             // moves per second (Nokia-style medium)
+  speedIncrementPerFood: 0,    // keep stable; could increase for difficulty
+  cellPadding: 1,
+  gestureDebounceMs: 100,
+  trackingSmoothing: 0.6,      // smoothing factor for index tip position
+  directionThreshold: 8,       // pixel velocity threshold to register direction on camera coords
+  minDetectionConfidence: 0.6,
+  minTrackingConfidence: 0.6,
+  // FIXED: Use consistent canvas dimensions
+  canvasWidth: 640,
+  canvasHeight: 640
+};
+
+let state = {
+  gridW: config.gridSize,
+  gridH: config.gridSize,
+  snake: null,
+  dir: {x:1,y:0},   // current movement direction (grid units)
+  pendingDir: null,
+  food: null,
+  score: 0,
+  highScore: 0,
+  running: false,
+  gameTickMs: null,
+  lastTick: performance.now(),
+  lastGestureAt: 0,
+  lastIndexPos: null,     // in video coords
+  smoothedIndex: null,
+  calibrated: false,
+  neutralPos: null,
+  trackingEnabled: true,
+  lastTrackingFrameTime: 0,
+  lastLog: '',
+  // FIXED: Cache cell dimensions to prevent recalculation
+  cellWidth: config.canvasWidth / config.gridSize,
+  cellHeight: config.canvasHeight / config.gridSize
+};
+
+/* ================
+   === DOM stuff
+   ================ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const highEl = document.getElementById('highScore');
+const statusText = document.getElementById('statusText');
+const trackingStatus = document.getElementById('trackingStatus');
+const gestureText = document.getElementById('gestureText');
+const logArea = document.getElementById('logArea');
+const cameraStatus = document.getElementById('cameraStatus');
+const videoElem = document.getElementById('inputVideo');
+const videoPreview = document.getElementById('videoPreview');
+
+// FIXED: Set canvas to fixed size and ensure smooth rendering
+canvas.width = config.canvasWidth;
+canvas.height = config.canvasHeight;
+ctx.imageSmoothingEnabled = false; // Keep pixel-perfect rendering
+
+/* ======= GAME LOGIC (grid-based) ======= */
+function resetGame() {
+  state.snake = [];
+  const cx = Math.floor(state.gridW/2);
+  const cy = Math.floor(state.gridH/2);
+  for(let i=0;i<config.initialLength;i++){
+    state.snake.push({x: cx - i, y: cy});
+  }
+  state.dir = {x:1,y:0};
+  state.pendingDir = null;
+  state.score = 0;
+  placeFood();
+  state.running = true;
+  updateHUD();
+  log('Game reset');
+}
+
+function placeFood() {
+  const occupied = new Set(state.snake.map(s => `${s.x},${s.y}`));
+  let tries = 0;
+  while(true){
+    tries++;
+    const fx = Math.floor(Math.random()*state.gridW);
+    const fy = Math.floor(Math.random()*state.gridH);
+    if(!occupied.has(`${fx},${fy}`)) { state.food = {x:fx,y:fy}; break;}
+    if(tries>500) { state.food = {x:0,y:0}; break; }
+  }
+}
+
+function gameTick() {
+  if(!state.running) return;
+  // apply pending direction (if valid — prevent 180-degree)
+  if(state.pendingDir){
+    const pd = state.pendingDir;
+    if(!(pd.x === -state.dir.x && pd.y === -state.dir.y)){
+      state.dir = pd;
+    }
+    state.pendingDir = null;
+  }
+
+  // move snake
+  const head = {...state.snake[0]};
+  head.x += state.dir.x;
+  head.y += state.dir.y;
+
+  // wall collision
+  if(head.x < 0 || head.x >= state.gridW || head.y < 0 || head.y >= state.gridH) {
+    onGameOver('wall');
+    return;
+  }
+
+  // self collision
+  for(let i=0;i<state.snake.length;i++){
+    if(state.snake[i].x === head.x && state.snake[i].y === head.y){
+      onGameOver('self');
+      return;
+    }
+  }
+
+  state.snake.unshift(head);
+
+  // food?
+  if(head.x === state.food.x && head.y === state.food.y){
+    state.score += 10;
+    placeFood();
+    // optionally increase speed here
+  } else {
+    state.snake.pop();
+  }
+  if(state.score > state.highScore) {
+    state.highScore = state.score;
+    localStorage.setItem('handSnakeHigh', state.highScore);
+  }
+  updateHUD();
+}
+
+function onGameOver(reason){
+  state.running = false;
+  statusText.textContent = `Game over (${reason}). Press Restart.`;
+  log(`Game over: ${reason} | Score: ${state.score}`);
+}
+
+/* ======= RENDER (FIXED) ======= */
+function updateHUD(){ scoreEl.textContent = state.score; highEl.textContent = state.highScore; }
+
+function draw() {
+  // FIXED: Use consistent canvas dimensions and clear properly
+  ctx.clearRect(0, 0, config.canvasWidth, config.canvasHeight);
+  
+  // Draw background
+  ctx.fillStyle = '#041018';
+  ctx.fillRect(0, 0, config.canvasWidth, config.canvasHeight);
+
+  // FIXED: Use cached cell dimensions for consistent rendering
+  const cellW = state.cellWidth;
+  const cellH = state.cellHeight;
+
+  // draw food
+  if(state.food){
+    drawCell(state.food.x, state.food.y, '#ff6b6b');
+  }
+
+  // draw snake
+  for(let i=0;i<state.snake.length;i++){
+    const s = state.snake[i];
+    drawCell(s.x, s.y, i===0 ? '#b5f5b0' : '#58c67b', i===0);
+  }
+
+  // draw small camera mini overlay indicator if tracking
+  if(state.smoothedIndex && showPreview){
+    // map index to canvas coords for fun overlay
+    const p = mapVideoPointToCanvas(state.smoothedIndex);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(6, Math.min(cellW, cellH)/2), 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  requestAnimationFrame(draw);
+}
+
+function drawCell(gx, gy, color='#fff', isHead=false){
+  // FIXED: Use cached dimensions and ensure pixel-aligned rendering
+  const x = Math.floor(gx * state.cellWidth + config.cellPadding);
+  const y = Math.floor(gy * state.cellHeight + config.cellPadding);
+  const w = Math.floor(state.cellWidth - config.cellPadding * 2);
+  const h = Math.floor(state.cellHeight - config.cellPadding * 2);
+  
+  ctx.fillStyle = color;
+  ctx.fillRect(x, y, w, h);
+  
+  if(isHead){
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  }
+}
+
+/* ================
+   Timing / Loop (IMPROVED)
+   ================ */
+function startGameLoop() {
+  state.gameTickMs = 1000 / Math.max(1, (config.initialSpeed));
+  state.lastTick = performance.now();
+  // FIXED: Clear any existing interval to prevent multiple timers
+  if(state._tickInterval) {
+    clearInterval(state._tickInterval);
+  }
+  state._tickInterval = setInterval(() => {
+    if(state.running) {
+      gameTick();
+    }
+  }, state.gameTickMs);
+}
+
+/* ================
+   INPUT: map finger movement -> direction
+   ================= */
+function setDirectionFromVector(vx, vy) {
+  // map dominant axis
+  if(Math.abs(vx) > Math.abs(vy)){
+    // FIXED: Invert X direction because camera is mirrored for UX
+    // When finger moves right, vx is positive, but we want snake to go right (positive x)
+    // When finger moves left, vx is negative, but we want snake to go left (negative x)
+    if(vx > 0) setDir({x:-1,y:0}); else setDir({x:1,y:0});
+  } else {
+    // Y direction: camera y increases downward, but finger up should mean snake up
+    if(vy > 0) setDir({x:0,y:-1}); else setDir({x:0,y:1});
+  }
+}
+
+function setDir(d){
+  // store as pending to apply on next tick (avoid mid-tick reversals)
+  state.pendingDir = d;
+}
+
+function mapVideoPointToCanvas(pt){
+  // FIXED: Use fixed canvas dimensions
+  const vW = videoElem.videoWidth || videoElem.clientWidth;
+  const vH = videoElem.videoHeight || videoElem.clientHeight;
+  if(!vW || !vH) return {x: config.canvasWidth/2, y: config.canvasHeight/2};
+  
+  // video is mirrored in preview; original landmarks correspond to mirrored video for UX -> mirror x
+  const normX = pt.x / vW;
+  const normY = pt.y / vH;
+  return { 
+    x: (1 - normX) * config.canvasWidth, 
+    y: normY * config.canvasHeight 
+  };
+}
+
+/* ===========================
+   === GESTURE HEURISTICS
+   =========================== */
+/*
+  Landmarks indices (MediaPipe Hands): 0: wrist, 4:thumb_tip, 8:index_tip, 12:middle_tip, 16:ring_tip, 20:pinky_tip
+  Use distances between fingertips and wrist / palm center to detect open palm vs fist vs thumbs-up.
+*/
+function detectGestures(landmarks) {
+  if(!landmarks || landmarks.length === 0) return null;
+  const l = landmarks[0]; // single hand scenario
+  const wrist = l[0];
+  const tips = [l[4], l[8], l[12], l[16], l[20]];
+  // compute distances
+  const dists = tips.map(t => Math.hypot((t.x - wrist.x), (t.y - wrist.y)));
+  // normalize by image diagonal
+  const diag = Math.hypot(videoElem.videoWidth||videoElem.clientWidth, videoElem.videoHeight||videoElem.clientHeight) || 1;
+  const nd = dists.map(d => d * (videoElem.videoWidth||videoElem.clientWidth) / diag); // scale approx
+  const avg = nd.reduce((a,b)=>a+b,0)/nd.length;
+  const thumbExtended = nd[0] > (avg*0.9);
+  const othersExtended = nd.slice(1).filter(x => x > avg*0.85).length;
+  // simple thresholds:
+  if(othersExtended >= 4 && nd[0] >= avg*0.8) return 'open_palm';
+  if(othersExtended <= 1 && nd[0] <= avg*1.1) return 'fist';
+  if(thumbExtended && othersExtended <= 1) return 'thumbs_up';
+  return null;
+}
+
+/* ===========================
+   === MediaPipe HANDS set up
+   =========================== */
+
+let hands = null;
+let camera = null;
+let showPreview = true;
+let lastIndexScreen = null;
+let landmarkBuffer = []; // for smoothing velocity
+
+async function setupHands() {
+  hands = new Hands({
+    locateFile: (file) => {
+      // load model files from jsdelivr CDN (this is the approach recommended in MPJS examples)
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }
+  });
+
+  hands.setOptions({
+    maxNumHands: 1,
+    modelComplexity: 1,
+    minDetectionConfidence: config.minDetectionConfidence,
+    minTrackingConfidence: config.minTrackingConfidence
+  });
+
+  hands.onResults(onHandResults);
+
+  // Camera util from MediaPipe
+  camera = new Camera(videoElem, {
+    onFrame: async () => { 
+      try {
+        await hands.send({image: videoElem});
+      } catch(e){
+        log('hands.send error: '+e.message);
+      }
+    },
+    width: 640,
+    height: 480
+  });
+
+  // start camera
+  try {
+    await camera.start();
+    cameraStatus.textContent = 'Camera running';
+    trackingStatus.textContent = 'Tracker ready';
+    state.trackingEnabled = true;
+    log('Camera started');
+  } catch (err) {
+    cameraStatus.textContent = 'Camera error';
+    trackingStatus.textContent = 'Camera permission or device error';
+    state.trackingEnabled = false;
+    log('Camera start failed: ' + (err.message || err));
+  }
+}
+
+/* ===========================
+   === HAND RESULTS callback
+   =========================== */
+function onHandResults(results) {
+  state.lastTrackingFrameTime = performance.now();
+  // results.multiHandLandmarks is array of hands
+  if(!results || !results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
+    trackingStatus.textContent = 'No hand detected';
+    gestureText.textContent = 'Gesture: —';
+    return;
+  }
+  const landmarks = results.multiHandLandmarks;
+  const land = landmarks[0];
+  // Convert normalized landmarks to pixel coords on video element
+  const vW = videoElem.videoWidth || videoElem.clientWidth;
+  const vH = videoElem.videoHeight || videoElem.clientHeight;
+  const indexTip = { x: land[8].x * vW, y: land[8].y * vH };
+  // smoothing
+  if(!state.smoothedIndex) state.smoothedIndex = indexTip;
+  state.smoothedIndex.x = state.smoothedIndex.x * config.trackingSmoothing + indexTip.x * (1 - config.trackingSmoothing);
+  state.smoothedIndex.y = state.smoothedIndex.y * config.trackingSmoothing + indexTip.y * (1 - config.trackingSmoothing);
+
+  // velocity (difference between last two)
+  if(state.lastIndexPos) {
+    const vx = state.smoothedIndex.x - state.lastIndexPos.x;
+    const vy = state.smoothedIndex.y - state.lastIndexPos.y;
+    // small smoothing buffer
+    landmarkBuffer.push({vx,vy,ts:performance.now()});
+    if(landmarkBuffer.length>6) landmarkBuffer.shift();
+    // compute average velocity
+    const avg = landmarkBuffer.reduce((acc,cur)=>{acc.vx+=cur.vx; acc.vy+=cur.vy; return acc},{vx:0,vy:0});
+    avg.vx/=landmarkBuffer.length; avg.vy/=landmarkBuffer.length;
+
+    // threshold to avoid jitter; throttle direction updates to tick budget
+    if(Math.hypot(avg.vx, avg.vy) > config.directionThreshold) {
+      // invert vy because camera y increases downward but finger up should mean snake up
+      setDirectionFromVector(avg.vx, -avg.vy);
+    }
+  }
+  state.lastIndexPos = { ...state.smoothedIndex };
+
+  // gesture detection (debounced)
+  const g = detectGestures(landmarks);
+  if(g && (performance.now() - state.lastGestureAt) > config.gestureDebounceMs) {
+    state.lastGestureAt = performance.now();
+    gestureText.textContent = 'Gesture: ' + g;
+    if(g === 'open_palm') {
+      if(state.running) { state.running = false; statusText.textContent = 'Paused (open palm)'; log('Paused via gesture'); }
+    } else if(g === 'fist') {
+      if(!state.running) { state.running = true; statusText.textContent = 'Resumed (fist)'; log('Resumed via gesture'); }
+    } else if(g === 'thumbs_up') {
+      log('Restart via thumbs-up');
+      resetGame();
+    }
+  }
+
+  // store for HUD
+  trackingStatus.textContent = 'Hand detected';
+}
+
+/* ===========================
+   === UI interaction bindings
+   =========================== */
+document.getElementById('btnPause').addEventListener('click', ()=>{ state.running=false; statusText.textContent='Paused (manual)'; log('Paused via button');});
+document.getElementById('btnResume').addEventListener('click', ()=>{ state.running=true; statusText.textContent='Running'; log('Resumed via button');});
+document.getElementById('btnRestart').addEventListener('click', ()=>{ resetGame();});
+document.getElementById('btnCalibrate').addEventListener('click', ()=>{ calibrateNeutral(); });
+document.getElementById('btnTogglePreview').addEventListener('click', ()=>{ showPreview = !showPreview; videoPreview.style.display = showPreview ? 'block' : 'none'; });
+
+document.getElementById('dirUp').addEventListener('click', ()=> setDir({x:0,y:-1}));
+document.getElementById('dirDown').addEventListener('click', ()=> setDir({x:0,y:1}));
+document.getElementById('dirLeft').addEventListener('click', ()=> setDir({x:-1,y:0}));
+document.getElementById('dirRight').addEventListener('click', ()=> setDir({x:1,y:0}));
+document.getElementById('pauseFallback').addEventListener('click', ()=>{ state.running=false; statusText.textContent='Paused (fallback)'; });
+document.getElementById('restartFallback').addEventListener('click', ()=>{ resetGame(); });
+
+/* ================
+   Calibration
+   ================ */
+function calibrateNeutral(){
+  if(!state.smoothedIndex) { alert('Show your hand to the camera for calibration'); return; }
+  state.neutralPos = {...state.smoothedIndex};
+  state.calibrated = true;
+  statusText.textContent = 'Calibrated';
+  log('Calibration set');
+}
+
+/* ================
+   Persistence + init
+   ================ */
+function log(msg){
+  const ts = new Date().toLocaleTimeString();
+  const line = `[${ts}] ${msg}`;
+  state.lastLog = line;
+  logArea.textContent = line + '\n' + logArea.textContent;
+  if(logArea.textContent.length>4000) logArea.textContent = logArea.textContent.slice(0,4000);
+}
+function loadHighScore(){ state.highScore = parseInt(localStorage.getItem('handSnakeHigh')||'0'); updateHUD(); }
+
+/* ===========================
+   === Initialization (FIXED)
+   =========================== */
+async function init() {
+  loadHighScore();
+  statusText.textContent = 'Starting tracker...';
+  
+  // FIXED: Initialize canvas settings once
+  canvas.width = config.canvasWidth;
+  canvas.height = config.canvasHeight;
+  ctx.imageSmoothingEnabled = false;
+  state.cellWidth = config.canvasWidth / config.gridSize;
+  state.cellHeight = config.canvasHeight / config.gridSize;
+  
+  await setupHands().catch(e => {
+    log('setupHands failed: ' + e);
+    trackingStatus.textContent = 'tracker init failed';
+  });
+  
+  // start game
+  resetGame();
+  startGameLoop();
+  requestAnimationFrame(draw);
+  statusText.textContent = 'Ready';
+}
+
+/* expose some debug for devs in console */
+window._hs = { state, resetGame, setDir, log };
+
+/* kick off */
+init();
+
+/* ===========================
+   === Safety / permissions handling
+   =========================== */
+// show clear messaging if camera not allowed
+navigator.permissions && navigator.permissions.query({name:'camera'}).then(p=>{
+  if(p.state === 'denied') {
+    cameraStatus.textContent = 'Camera blocked — enable in browser settings';
+    log('Camera permission denied');
+  }
+}).catch(()=>{/* ignore */});
+
+</script>
+</body>
+</html>
